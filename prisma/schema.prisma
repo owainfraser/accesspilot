@@ -1,0 +1,203 @@
+// AccessPilot — Prisma Schema
+// Run `prisma generate` after changes, `prisma migrate dev` to apply migrations
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Enums ───────────────────────────────────────────────────────────────────
+
+enum UserRole {
+  ADMIN
+  APPROVER
+  REQUESTER
+}
+
+enum PlanTier {
+  FREE
+  STARTER
+  PROFESSIONAL
+  ENTERPRISE
+}
+
+enum ResourceType {
+  ENTRA_ROLE
+  M365_GROUP
+  AZURE_RESOURCE
+  LOCAL_ADMIN
+}
+
+enum RequestStatus {
+  PENDING
+  APPROVED
+  DENIED
+  EXPIRED
+  REVOKED
+}
+
+enum GrantStatus {
+  ACTIVE
+  EXPIRED
+  REVOKED
+}
+
+enum ApprovalStepStatus {
+  PENDING
+  APPROVED
+  DENIED
+}
+
+// ─── Models ──────────────────────────────────────────────────────────────────
+
+model Organization {
+  id               String   @id @default(cuid())
+  name             String
+  entraIdTenantId  String?  @unique
+  entraIdClientId  String?
+  entraClientSecret String? // encrypted at rest — store via KMS in production
+  planTier         PlanTier @default(FREE)
+  clerkOrgId       String?  @unique
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  users         User[]
+  policies      AccessPolicy[]
+  requests      AccessRequest[]
+  grants        AccessGrant[]
+  auditLogs     AuditLog[]
+
+  @@map("organizations")
+}
+
+model User {
+  id             String   @id @default(cuid())
+  email          String
+  name           String
+  role           UserRole @default(REQUESTER)
+  organizationId String
+  entraIdUserId  String?
+  clerkUserId    String?  @unique
+  avatarUrl      String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization   Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  requests       AccessRequest[] @relation("RequesterRequests")
+  approvals      AccessRequest[] @relation("ApproverRequests")
+  grantRevocations AccessGrant[] @relation("RevokedByUser")
+  approvalSteps  ApprovalStep[]
+  auditLogs      AuditLog[]
+
+  @@unique([email, organizationId])
+  @@map("users")
+}
+
+model AccessPolicy {
+  id                   String       @id @default(cuid())
+  name                 String
+  description          String?
+  organizationId       String
+  resourceType         ResourceType
+  autoApprove          Boolean      @default(false)
+  maxDurationMinutes   Int          @default(480) // 8 hours default
+  requiresMFA          Boolean      @default(false)
+  requiresJustification Boolean     @default(true)
+  approverGroupId      String?      // Entra group ID of approvers
+  approverUserId       String?      // specific user approver
+  isActive             Boolean      @default(true)
+  createdAt            DateTime     @default(now())
+  updatedAt            DateTime     @updatedAt
+
+  organization  Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  requests      AccessRequest[]
+
+  @@map("access_policies")
+}
+
+model AccessRequest {
+  id                     String        @id @default(cuid())
+  requesterId            String
+  organizationId         String
+  policyId               String
+  resourceId             String        // Entra role ID, group ID, etc.
+  resourceName           String        // human-readable name
+  justification          String?
+  status                 RequestStatus @default(PENDING)
+  requestedDurationMinutes Int
+  approvedById           String?
+  approvedAt             DateTime?
+  expiresAt              DateTime?
+  denialReason           String?
+  createdAt              DateTime      @default(now())
+  updatedAt              DateTime      @updatedAt
+
+  requester     User          @relation("RequesterRequests", fields: [requesterId], references: [id])
+  approvedBy    User?         @relation("ApproverRequests", fields: [approvedById], references: [id])
+  organization  Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  policy        AccessPolicy  @relation(fields: [policyId], references: [id])
+  grant         AccessGrant?
+  approvalSteps ApprovalStep[]
+
+  @@map("access_requests")
+}
+
+model AccessGrant {
+  id           String      @id @default(cuid())
+  requestId    String      @unique
+  userId       String
+  organizationId String
+  resourceType ResourceType
+  resourceId   String
+  resourceName String
+  grantedAt    DateTime    @default(now())
+  expiresAt    DateTime
+  revokedAt    DateTime?
+  revokedById  String?
+  status       GrantStatus @default(ACTIVE)
+  metadata     Json?       // store provider-specific grant details
+
+  request      AccessRequest @relation(fields: [requestId], references: [id])
+  revokedBy    User?         @relation("RevokedByUser", fields: [revokedById], references: [id])
+
+  @@map("access_grants")
+}
+
+model AuditLog {
+  id             String   @id @default(cuid())
+  organizationId String
+  userId         String?
+  action         String   // e.g. "request.created", "grant.revoked", "policy.updated"
+  resourceType   String?
+  resourceId     String?
+  metadata       Json?
+  ipAddress      String?
+  userAgent      String?
+  createdAt      DateTime @default(now())
+
+  organization  Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user          User?        @relation(fields: [userId], references: [id])
+
+  @@index([organizationId, createdAt])
+  @@index([userId])
+  @@map("audit_logs")
+}
+
+model ApprovalStep {
+  id         String             @id @default(cuid())
+  requestId  String
+  approverId String
+  status     ApprovalStepStatus @default(PENDING)
+  comment    String?
+  decidedAt  DateTime?
+  createdAt  DateTime           @default(now())
+
+  request   AccessRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  approver  User          @relation(fields: [approverId], references: [id])
+
+  @@map("approval_steps")
+}
